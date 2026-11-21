@@ -1,7 +1,11 @@
-import { MessageSquare, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { FileText, MessageSquare, Send, X } from 'lucide-react';
 import type { AgentState, TargetZone } from '@living-world/shared';
 import { useWorldStore } from '../store/useWorldStore';
+import { useDataStore } from '../store/useDataStore';
+import { api } from '../engine/api';
 import { AGENT_PROFILES } from '../engine/agents';
+import ArtifactView from './ArtifactView';
 
 const stateLabel: Record<AgentState, string> = {
   idle: 'Idle',
@@ -46,6 +50,28 @@ export default function InspectorPanel() {
   const setFollowAgent = useWorldStore((s) => s.setFollowAgent);
   const cameraPreset = useWorldStore((s) => s.cameraPreset);
   const setCameraPreset = useWorldStore((s) => s.setCameraPreset);
+
+  const artifacts = useDataStore((s) => s.artifacts);
+  const stats = useDataStore((s) => s.stats);
+  const chatByAgent = useDataStore((s) => s.chatByAgent);
+  const loadChat = useDataStore((s) => s.loadChat);
+  const setChat = useDataStore((s) => s.setChat);
+  const refreshArtifacts = useDataStore((s) => s.refreshArtifacts);
+  const refreshStats = useDataStore((s) => s.refreshStats);
+
+  const [chatInput, setChatInput] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [openArtifactId, setOpenArtifactId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    setChatError(null);
+    setOpenArtifactId(null);
+    void loadChat(selectedAgentId);
+    void refreshArtifacts();
+    void refreshStats();
+  }, [selectedAgentId, loadChat, refreshArtifacts, refreshStats]);
 
   const profile = selectedAgentId
     ? AGENT_PROFILES.find((p) => p.id === selectedAgentId)
@@ -101,9 +127,41 @@ export default function InspectorPanel() {
   const thoughtBubble = view?.thoughtBubble;
   const isFollowing =
     followAgentId === profile.id && cameraPreset === 'follow';
+  const agentTokens =
+    stats?.perAgent.find((p) => p.agentId === profile.id)?.totalTokens ?? 0;
+  const agentArtifacts = artifacts
+    .filter((a) => a.agentId === profile.id)
+    .slice()
+    .reverse();
+  const chatMessages = chatByAgent[profile.id] ?? [];
+
+  const sendChat = async () => {
+    const message = chatInput.trim();
+    if (!message || chatBusy) return;
+    setChatBusy(true);
+    setChatError(null);
+    const optimistic = [
+      ...chatMessages,
+      { role: 'user' as const, content: message, timestamp: Date.now() },
+    ];
+    setChat(profile.id, optimistic);
+    setChatInput('');
+    try {
+      const res = await api.chat(profile.id, message);
+      setChat(profile.id, [
+        ...optimistic,
+        { role: 'assistant' as const, content: res.reply, timestamp: Date.now() },
+      ]);
+      void refreshStats();
+    } catch (err) {
+      setChatError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatBusy(false);
+    }
+  };
 
   return (
-    <div className="glass w-72 rounded-2xl p-4">
+    <div className="glass max-h-[calc(100vh-6rem)] w-72 overflow-y-auto rounded-2xl p-4">
       {/* Header */}
       <div className="flex items-start gap-3">
         <div
@@ -150,6 +208,12 @@ export default function InspectorPanel() {
           <span className="w-16 shrink-0 opacity-70">Model</span>
           <span className="font-mono text-xs">{profile.model}</span>
         </div>
+        <div className="flex items-center gap-2">
+          <span className="w-16 shrink-0 opacity-70">Tokens</span>
+          <span className="font-mono text-xs">
+            {agentTokens.toLocaleString()} used (server total)
+          </span>
+        </div>
       </div>
 
       {/* Thought bubble */}
@@ -189,9 +253,102 @@ export default function InspectorPanel() {
         )}
       </div>
 
+      {/* Artifacts produced by this agent (Phase 3) */}
+      <div className="mt-4">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold tracking-widest opacity-70">
+          <FileText className="h-3.5 w-3.5" />
+          ARTIFACTS ({agentArtifacts.length})
+        </div>
+        {agentArtifacts.length === 0 ? (
+          <p className="text-[12px] opacity-70">
+            Nothing yet — artifacts appear here after this agent completes
+            real subtasks.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {agentArtifacts.slice(0, 6).map((artifact) => {
+              const open = openArtifactId === artifact.id;
+              return (
+                <div key={artifact.id}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenArtifactId(open ? null : artifact.id)}
+                    className="glass-button w-full truncate rounded-lg px-2 py-1 text-left font-mono text-[11px]"
+                  >
+                    {artifact.filename}
+                  </button>
+                  {open ? (
+                    <div className="mt-1">
+                      <ArtifactView artifact={artifact} />
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Live chat (Phase 3) — real LLM replies, never mocked */}
+      <div className="mt-4">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold tracking-widest opacity-70">
+          <MessageSquare className="h-3.5 w-3.5" />
+          LIVE CHAT
+        </div>
+        <div className="flex max-h-52 flex-col gap-1.5 overflow-y-auto pr-0.5">
+          {chatMessages.length === 0 ? (
+            <p className="text-[12px] opacity-70">
+              Say hello — {profile.name} answers with a real LLM call.
+            </p>
+          ) : (
+            chatMessages.map((m, i) => (
+              <div
+                key={i}
+                className={`rounded-lg p-2 text-[12px] leading-relaxed ${
+                  m.role === 'user'
+                    ? 'ml-6 bg-sky-500/20'
+                    : 'mr-6 bg-white/10'
+                }`}
+              >
+                {m.content}
+              </div>
+            ))
+          )}
+          {chatBusy ? (
+            <p className="text-[12px] italic opacity-70">
+              {profile.name} is thinking…
+            </p>
+          ) : null}
+        </div>
+        {chatError ? (
+          <p className="mt-1 text-[11px] leading-snug text-red-200">{chatError}</p>
+        ) : null}
+        <div className="mt-1.5 flex gap-1.5">
+          <input
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void sendChat();
+            }}
+            placeholder={`Message ${profile.name}…`}
+            className="min-w-0 flex-1 rounded-lg bg-black/30 px-2 py-1.5 text-[13px] outline-none placeholder:opacity-50"
+          />
+          <button
+            type="button"
+            disabled={!chatInput.trim() || chatBusy}
+            onClick={() => void sendChat()}
+            className="glass-button flex shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-[13px] disabled:opacity-40"
+          >
+            <Send className="h-3.5 w-3.5" />
+            Send
+          </button>
+        </div>
+      </div>
+
       <p className="mt-4 text-[11px] leading-relaxed opacity-70">
-        Live chat, tool logs &amp; artifacts arrive in Phase 3. In DEMO_MODE
-        this agent is driven by the local life simulator — no LLM calls.
+        Chat &amp; artifacts are powered by the Phase 3 orchestrator on the
+        server. When the server is offline (DEMO_MODE) they are unavailable —
+        nothing here is mocked.
       </p>
     </div>
   );

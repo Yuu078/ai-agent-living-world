@@ -1,6 +1,7 @@
-import { Lock } from 'lucide-react';
+import { ClipboardList, Lock, Users } from 'lucide-react';
 import type { AgentState } from '@living-world/shared';
 import { useWorldStore } from '../store/useWorldStore';
+import { useDataStore } from '../store/useDataStore';
 import { AGENT_PROFILES } from '../engine/agents';
 
 const stateLabel: Record<AgentState, string> = {
@@ -30,13 +31,12 @@ const stateColor: Record<AgentState, string> = {
 };
 
 const UPCOMING_FEATURES: readonly string[] = [
-  'Tasks — Phase 3',
-  'Meetings — Phase 3',
   'Build Mode — Phase 4',
   'Logs — Phase 2',
 ];
 
 export default function Sidebar() {
+  const setActivePanel = useDataStore((s) => s.setActivePanel);
   const agentViews = useWorldStore((s) => s.agentViews);
   const selectedAgentId = useWorldStore((s) => s.selectedAgentId);
   const selectAgent = useWorldStore((s) => s.selectAgent);
@@ -133,6 +133,31 @@ export default function Sidebar() {
               <span className="float-right text-xs opacity-80">
                 {cutaway ? 'On' : 'Off'}
               </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Workspace — Phase 3 live features */}
+        <div>
+          <div className="mb-2 text-[11px] font-semibold tracking-widest opacity-70">
+            WORKSPACE
+          </div>
+          <div className="flex flex-col gap-1">
+            <button
+              type="button"
+              onClick={() => setActivePanel('tasks')}
+              className="glass-button flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm"
+            >
+              <ClipboardList className="h-4 w-4 shrink-0" />
+              Tasks — Live Orchestrator
+            </button>
+            <button
+              type="button"
+              onClick={() => setActivePanel('meetings')}
+              className="glass-button flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm"
+            >
+              <Users className="h-4 w-4 shrink-0" />
+              Meetings — Live Discussion
             </button>
           </div>
         </div>

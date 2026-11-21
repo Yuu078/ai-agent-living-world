@@ -120,6 +120,56 @@ export interface GridMap {
   blocked: Uint8Array;
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 3 DTOs — LLM orchestrator, artifacts, meetings, chat, stats   */
+/* ------------------------------------------------------------------ */
+
+/** A stored text artifact produced by an agent (Spec Section 4). */
+export interface ArtifactPayload {
+  id: string;
+  taskId: string | null;
+  agentId: string | null;
+  filename: string;
+  mimeType: string;
+  contentText: string;
+  createdAt: number;
+}
+
+export type MeetingStatus = 'scheduled' | 'running' | 'completed' | 'failed';
+
+export interface MeetingTurn {
+  agentId: string;
+  agentName: string;
+  text: string;
+  timestamp: number;
+}
+
+export interface MeetingPayload {
+  id: string;
+  topic: string;
+  participantIds: string[];
+  transcript: MeetingTurn[];
+  actionItems: string[];
+  status: MeetingStatus;
+}
+
+export interface ChatMessagePayload {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+}
+
+/** Aggregated token / cost totals, summed from the `agents` table. */
+export interface WorldStats {
+  totalTokens: number;
+  totalCostUsd: number;
+  perAgent: Array<{
+    agentId: string;
+    totalTokens: number;
+    totalCostUsd: number;
+  }>;
+}
+
 export type AppMode = 'DEMO_MODE' | 'LIVE_MODE';
 
 export type CameraPreset = 'isometric' | 'orbit' | 'top' | 'follow';

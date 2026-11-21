@@ -3,7 +3,7 @@
  *
  * Prerequisite: the Phase 2 server is RUNNING (coordinator starts it on a
  * fresh DB). This script:
- *   1. GET /health                       -> expects phase 2
+ *   1. GET /health                       -> expects phase >= 2 (server now reports phase 3; the Gate 2 surface is unchanged)
  *   2. POST /api/telemetry, wrong token  -> expects 401
  *   3. POST /api/telemetry, bad payload  -> expects 400
  *   4. Connects a Socket.IO test client
@@ -57,7 +57,7 @@ const post = (body, token) =>
 
 /* --- 1. health ------------------------------------------------------------ */
 const health = await (await fetch(`${BASE}/health`)).json();
-check('GET /health reports phase 2', health.status === 'ok' && health.phase === 2, JSON.stringify(health));
+check('GET /health reports phase >= 2', health.status === 'ok' && typeof health.phase === 'number' && health.phase >= 2, JSON.stringify(health));
 
 /* --- 2. wrong token -> 401 ------------------------------------------------- */
 const wrong = await post({ agentId: 'agent-programmer-1', state: 'typing', targetZone: 'desk' }, 'definitely-wrong');

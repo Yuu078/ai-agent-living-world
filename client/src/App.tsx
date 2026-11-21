@@ -2,15 +2,21 @@ import { useEffect } from 'react';
 import WorldCanvas from './scene/WorldCanvas';
 import TopBar from './ui/TopBar';
 import Sidebar from './ui/Sidebar';
+import TasksPanel from './ui/TasksPanel';
+import MeetingsPanel from './ui/MeetingsPanel';
 import InspectorPanel from './ui/InspectorPanel';
 import BottomDock from './ui/BottomDock';
 import { useWorldStore } from './store/useWorldStore';
+import { useDataStore } from './store/useDataStore';
 import { simulation } from './engine/simulation';
 import { disposeSocketBridge, initSocketBridge } from './engine/socketBridge';
 
 export default function App() {
+  const activePanel = useDataStore((s) => s.activePanel);
+
   useEffect(() => {
     initSocketBridge();
+    void useDataStore.getState().refreshAll();
     simulation.onViewChange = (id, view) => {
       useWorldStore.getState().syncAgentView(id, view);
     };
@@ -44,7 +50,13 @@ export default function App() {
         </div>
 
         <div className="pointer-events-auto absolute left-3 top-20">
-          <Sidebar />
+          {activePanel === 'tasks' ? (
+            <TasksPanel />
+          ) : activePanel === 'meetings' ? (
+            <MeetingsPanel />
+          ) : (
+            <Sidebar />
+          )}
         </div>
 
         <div className="pointer-events-auto absolute right-3 top-20">

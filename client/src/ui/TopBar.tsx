@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { Bot, Clock, Coins, Users } from 'lucide-react';
 import { useWorldStore } from '../store/useWorldStore';
+import { useDataStore } from '../store/useDataStore';
 import { AGENT_PROFILES } from '../engine/agents';
 
 function formatClock(clockMinutes: number): string {
@@ -16,6 +18,14 @@ export default function TopBar() {
   const mode = useWorldStore((s) => s.mode);
   const serverConnected = useWorldStore((s) => s.serverConnected);
   const isLive = mode === 'LIVE_MODE' && serverConnected;
+  const stats = useDataStore((s) => s.stats);
+  const refreshStats = useDataStore((s) => s.refreshStats);
+
+  useEffect(() => {
+    void refreshStats();
+    const timer = setInterval(() => void refreshStats(), 5000);
+    return () => clearInterval(timer);
+  }, [refreshStats]);
 
   const activeCount = Object.values(agentViews).filter(
     (v) => v.state !== 'idle' && v.state !== 'sitting',
@@ -79,12 +89,16 @@ export default function TopBar() {
           </div>
         </div>
 
-        {/* API cost */}
+        {/* API cost + tokens — real totals from the server (Phase 3) */}
         <div className="flex items-center gap-2">
           <Coins className="h-4 w-4 opacity-80" />
           <div className="leading-tight">
-            <div className="font-mono text-sm font-semibold">$0.00</div>
-            <div className="text-[10px] opacity-70">API cost</div>
+            <div className="font-mono text-sm font-semibold">
+              ${stats ? stats.totalCostUsd.toFixed(2) : '0.00'}
+            </div>
+            <div className="text-[10px] opacity-70">
+              API cost · {stats ? stats.totalTokens.toLocaleString() : '0'} tokens
+            </div>
           </div>
         </div>
       </div>

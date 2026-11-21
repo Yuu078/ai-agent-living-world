@@ -11,6 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import type { TaskPayload, TaskStatus } from '@living-world/shared';
 import { db } from '../db/index.js';
 import { agents, taskEvents, tasks } from '../db/schema.js';
+import { abortTask, kickRetry } from '../engine/orchestrator.js';
 
 const PRIORITIES: readonly string[] = ['low', 'normal', 'high'];
 const CANCELLABLE: readonly string[] = ['queued', 'running', 'waiting_approval'];
@@ -196,6 +197,9 @@ export default async function tasksRoutes(app: FastifyInstance): Promise<void> {
         .code(409)
         .send({ error: `cannot cancel a task with status '${row.status}'` });
     }
+    // Tell the orchestrator first so a running goal stops between
+    // steps instead of completing work nobody wants anymore.
+    abortTask(row.id);
     db.update(tasks)
       .set({ status: 'failed', errorLog: 'Cancelled by operator' })
       .where(eq(tasks.id, row.id))
@@ -219,6 +223,9 @@ export default async function tasksRoutes(app: FastifyInstance): Promise<void> {
       .run();
     const updated = getTask(row.id);
     if (updated) logStatusEvent(updated, row.status);
+    // Phase 3: if this task is an orchestrated goal, resume it
+    // (completed subtasks are kept; the rest re-run).
+    kickRetry(row.id);
     return updated ? toDto(updated) : reply.code(404).send({ error: 'task not found' });
   });
 }
