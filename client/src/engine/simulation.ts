@@ -1,416 +1,710 @@
 /**
- * Simulation — the DEMO_MODE runtime engine (Phase 1).
+ * Client-side movement + life simulation (Spec Sections 6 & 7).
  *
- * Owns the mutable per-agent runtime state (position, path, timers) outside
- * of React so the 60fps render loop never triggers re-renders. Movement
- * follows A* waypoint lists cell-center to cell-center (4-directional), so
- * avatars physically cannot cross walls or furniture (Hard Rule 3).
- * Behaviour comes from lifeSim.ts — no LLM calls exist in Phase 1.
+ * Owns the floating-point position of every agent and walks them along
+ * A* waypoint paths at a fixed speed. Demo Mode (the default) drives
+ * agents with the local life simulator; when LIVE events arrive over
+ * Socket.IO, `applyExternalEvent` takes control of that agent
+ * (Spec Section 7: external events always override Demo Mode for that
+ * agent) and releases it back to the life simulator when the event goes
+ * idle.
+ *
+ * Phase 4 additions:
+ * - Multi-floor: each agent has a `floor`; goals on the other floor are
+ *   routed via the elevator (path to the entry cell -> ride -> path on
+ *   the destination floor), all on the same zero-clipping A* grids.
+ * - Dynamic obstacles: Build Mode placements rebuild the per-floor grids
+ *   (`setDynamicObjects`) and walking agents replan immediately.
+ * - Crowd: up to 24 lightweight guest agents (instanced rendering) that
+ *   wander the campus using the same pathfinding.
  */
 import type {
   AgentProfile,
   AgentState,
+  FloorId,
+  GridMap,
   GridPoint,
   TargetZone,
   WorldEvent,
+  WorldObjectPayload,
 } from '@living-world/shared';
 import { AGENT_PROFILES } from './agents';
+import { findPath } from './pathfinding';
 import {
-  buildGridMap,
-  gridToWorld,
   COFFEE_STANDS,
   DESKS,
+  ELEVATOR_ENTRY,
+  EXEC_SEATS,
   GARDEN_SPOTS,
+  LAB_SEATS,
   LOUNGE_SEATS,
   MEETING_SEATS,
   RECEPTION_SPOT,
+  buildGridMap,
+  applyDynamicObstacles,
+  cellKeyOf,
+  gridToWorld,
+  isWalkable,
+  worldToGrid,
+  facingToward,
+  zoneFloor,
+  type GridRect,
   type Seat,
 } from './worldLayout';
-import { findPath } from './pathfinding';
 import { pickNextGoal, type LifeGoal } from './lifeSim';
+
+export const WALK_SPEED = 2.2; // world units / second
+const RIDE_SECONDS = 1.4; // elevator ride duration
+const ARRIVE_EPS = 0.02;
 
 export interface AgentView {
   state: AgentState;
   zone: TargetZone;
-  thoughtBubble?: string;
+  thoughtBubble: string | null;
+  floor: FloorId;
+}
+
+export interface ElevatorRide {
+  from: FloorId;
+  to: FloorId;
+  /** 0..1 progress of the ride. */
+  t: number;
+  duration: number;
 }
 
 export interface AgentRuntime {
   profile: AgentProfile;
-  /** World-space position (floats, mutated every frame). */
   x: number;
   z: number;
-  /** Current rotation Y (radians). */
   facing: number;
   state: AgentState;
   zone: TargetZone;
-  thoughtBubble?: string;
-  /** Remaining A* waypoints (grid cells). */
-  path: GridPoint[];
-  /** Cell the agent is heading to / occupying. */
+  thoughtBubble: string | null;
+  /** The grid cell the agent is heading to (or standing on). */
   targetCell: GridPoint;
-  goalFacing: number;
+  path: GridPoint[];
   stayTimer: number;
-  /** Accumulated walked distance — drives the limb swing cycle. */
-  walkPhase: number;
-  /** 0..1 — how fast the agent is moving right now (animation blending). */
-  moveBlend: number;
-  /** True while an external/server event controls this agent (Phase 2). */
+  /** Set while a LIVE (server) event drives this agent. */
   controlled: boolean;
+  /** Current floor (Phase 4). */
+  floor: FloorId;
+  /** Active elevator ride, if any. */
+  ride: ElevatorRide | null;
+  /** Crowd guests are lightweight wanderers (instanced rendering). */
+  crowd: boolean;
+  /** 0..1 walk-cycle blend used by the avatar's pose driver. */
+  moveBlend: number;
+  /** Accumulated walk-cycle phase (advances with distance walked). */
+  walkPhase: number;
 }
 
-const WALK_SPEED = 2.6; // cells per second
-const TURN_SPEED = 10; // radians per second (smoothed facing)
+type Rng = () => number;
 
-function angleLerp(a: number, b: number, t: number): number {
-  let diff = (b - a) % (Math.PI * 2);
-  if (diff > Math.PI) diff -= Math.PI * 2;
-  if (diff < -Math.PI) diff += Math.PI * 2;
-  return a + diff * Math.min(1, t);
+const CROWD_COLORS = [
+  '#f59e0b', '#10b981', '#ec4899', '#06b6d4', '#f97316', '#84cc16',
+  '#e879f9', '#facc15', '#34d399', '#fb7185', '#a3e635', '#fda4af',
+];
+
+function crowdProfile(index: number): AgentProfile {
+  return {
+    id: `crowd-${index}`,
+    name: `Guest ${index + 1}`,
+    role: 'Visitor',
+    department: 'Guests',
+    model: '',
+    color: CROWD_COLORS[index % CROWD_COLORS.length]!,
+    deskIndex: 0,
+  };
 }
 
-const cellKey = (c: GridPoint) => `${c.gx},${c.gz}`;
+/** Spawn spots for crowd guests (garden + entrance apron). */
+const CROWD_SPAWNS: GridPoint[] = [
+  ...GARDEN_SPOTS,
+  { gx: 16, gz: 24 },
+  { gx: 17, gz: 24 },
+  { gx: 16, gz: 26 },
+  { gx: 33, gz: 25 },
+  { gx: 38, gz: 25 },
+];
 
-export class Simulation {
-  readonly grid = buildGridMap();
+class Simulation {
   readonly agents: AgentRuntime[] = [];
-  /** UI mirror callback — fired only when display state changes. */
+  /** Base grids (static layout only), one per floor. */
+  private readonly baseGrids: Record<FloorId, GridMap> = {
+    1: buildGridMap(1),
+    2: buildGridMap(2),
+  };
+  /** Live grids = base + Build Mode placements. */
+  private floorGrids: Record<FloorId, GridMap> = {
+    1: this.baseGrids[1],
+    2: this.baseGrids[2],
+  };
+  /** Build Mode placements by id (for validation + rebuilds). */
+  private dynamicById = new Map<string, { floor: FloorId; rect: GridRect }>();
+  private crowd: AgentRuntime[] = [];
+  private readonly pendingArrival = new Map<string, LifeGoal>();
+  /** Final goal waiting on the other side of an elevator ride. */
+  private readonly pendingJourney = new Map<string, LifeGoal>();
+  private readonly rng: Rng = Math.random;
   onViewChange: ((agentId: string, view: AgentView) => void) | null = null;
-  private rng: () => number;
 
-  constructor(rng: () => number = Math.random) {
-    this.rng = rng;
+  constructor() {
     AGENT_PROFILES.forEach((profile, i) => {
-      const chair = DESKS[profile.deskIndex]!.chair;
-      const w = gridToWorld(chair.gx, chair.gz);
+      const desk = DESKS[profile.deskIndex]!;
+      const w = gridToWorld(desk.chair.gx, desk.chair.gz);
       this.agents.push({
         profile,
         x: w.x,
         z: w.z,
-        facing: DESKS[profile.deskIndex]!.facing,
+        facing: desk.facing,
         state: 'typing',
         zone: 'desk',
-        thoughtBubble: undefined,
+        thoughtBubble: null,
+        targetCell: { ...desk.chair },
         path: [],
-        targetCell: chair,
-        goalFacing: DESKS[profile.deskIndex]!.facing,
-        // Stagger first decisions so the office doesn't move in lockstep.
-        stayTimer: 2 + i * 1.7 + rng() * 3,
-        walkPhase: 0,
-        moveBlend: 0,
+        // Stagger first departures so the office doesn't move in lockstep.
+        stayTimer: 4 + i * 3.5 + this.rng() * 4,
         controlled: false,
+        floor: 1,
+        ride: null,
+        crowd: false,
+        moveBlend: 0,
+        walkPhase: 0,
       });
     });
   }
 
-  getAgent(id: string): AgentRuntime | undefined {
-    return this.agents.find((a) => a.profile.id === id);
+  /* ---------------- grids & dynamic obstacles (Phase 4) ------------- */
+
+  /** Floor-1 live grid (kept for compatibility with older callers). */
+  get grid(): GridMap {
+    return this.floorGrids[1];
   }
 
-  isControlled(id: string): boolean {
-    return this.getAgent(id)?.controlled ?? false;
+  gridFor(floor: FloorId): GridMap {
+    return this.floorGrids[floor];
   }
 
-  /** First seat not targeted by another agent; falls back to the first seat. */
-  private pickFreeSeat(a: AgentRuntime, seats: readonly Seat[]): Seat {
-    const claimed = new Set(
-      this.agents.filter((o) => o !== a).map((o) => cellKey(o.targetCell)),
-    );
-    return seats.find((s) => !claimed.has(cellKey(s.cell))) ?? seats[0]!;
+  baseGridFor(floor: FloorId): GridMap {
+    return this.baseGrids[floor];
+  }
+
+  /** Grid for `floor` with every placement EXCEPT `excludeId` applied —
+   *  used to validate a moved/rotated object against the rest. */
+  gridWithout(floor: FloorId, excludeId: string): GridMap {
+    const rects: GridRect[] = [];
+    for (const [id, entry] of this.dynamicById) {
+      if (id !== excludeId && entry.floor === floor) rects.push(entry.rect);
+    }
+    return applyDynamicObstacles(this.baseGrids[floor], rects);
+  }
+
+  /** Cells currently occupied by agents (or reserved as their next
+   *  waypoint) on a floor — Build Mode may not cover these. */
+  agentCells(floor: FloorId): Set<string> {
+    const set = new Set<string>();
+    for (const a of this.allAgents()) {
+      if (a.floor !== floor || a.ride) continue;
+      set.add(cellKeyOf(a.targetCell));
+      if (a.path.length > 0) set.add(cellKeyOf(a.path[0]!));
+      const here = worldToGrid(a.x, a.z);
+      if (here.gx >= 0 && here.gz >= 0) set.add(cellKeyOf(here));
+    }
+    return set;
   }
 
   /**
-   * Apply an external/server WorldEvent (Phase 2, Visual Mapping Law).
-   * Controlled agents are held by the event until an `idle` event releases
-   * them back to lifeSim.
+   * Replace the dynamic-obstacle set from the persisted world objects
+   * (only `metadata.userPlaced === true` entries count), rebuild both
+   * floor grids, and replan every walking agent on the new grids.
    */
-  applyExternalEvent(ev: WorldEvent): void {
-    const a = this.getAgent(ev.agentId);
-    if (!a) return;
-
-    if (ev.state === 'idle') {
-      // Release control — lifeSim takes over via the normal depart() path.
-      a.controlled = false;
-      this.pendingArrival.delete(a.profile.id);
-      a.path = [];
-      this.setState(a, 'idle', undefined);
-      a.thoughtBubble = undefined;
-      a.stayTimer = 0.5;
-      return;
-    }
-
-    if (ev.state === 'celebrating' || ev.state === 'error') {
-      // No movement: cancel any path and play the state in place.
-      a.controlled = true;
-      this.pendingArrival.delete(a.profile.id);
-      a.path = [];
-      this.setState(a, ev.state, ev.thoughtBubble);
-      return;
-    }
-
-    a.controlled = true;
-
-    const desk = DESKS[a.profile.deskIndex]!;
-    let dest: GridPoint;
-    let facing: number;
-    let zone: TargetZone;
-    let arriveState: AgentState;
-
-    switch (ev.state) {
-      case 'typing':
-      case 'tool_calling':
-      case 'thinking': {
-        dest = desk.chair;
-        facing = desk.facing;
-        zone = 'desk';
-        arriveState = ev.state;
-        break;
+  setDynamicObjects(objects: readonly WorldObjectPayload[]): void {
+    this.dynamicById.clear();
+    for (const o of objects) {
+      const md = o.metadata ?? {};
+      if (md.userPlaced !== true) continue;
+      const floor: FloorId = md.floor === 2 ? 2 : 1;
+      const fp = md.footprint as Partial<GridRect> | undefined;
+      if (
+        !fp ||
+        ![fp.x0, fp.z0, fp.x1, fp.z1].every(
+          (v) => typeof v === 'number' && Number.isFinite(v),
+        )
+      ) {
+        continue;
       }
-      case 'meeting': {
-        const seat = this.pickFreeSeat(a, MEETING_SEATS);
-        dest = seat.cell;
-        facing = seat.facing;
-        zone = 'meeting_room';
-        arriveState = 'meeting';
-        break;
-      }
-      case 'coffee_break': {
-        const seat = this.pickFreeSeat(a, COFFEE_STANDS);
-        dest = seat.cell;
-        facing = seat.facing;
-        zone = 'coffee_bar';
-        arriveState = 'coffee_break';
-        break;
-      }
-      case 'sitting': {
-        if (ev.targetZone === 'lounge') {
-          const seat = this.pickFreeSeat(a, LOUNGE_SEATS);
-          dest = seat.cell;
-          facing = seat.facing;
-          zone = 'lounge';
-        } else {
-          dest = desk.chair;
-          facing = desk.facing;
-          zone = 'desk';
-        }
-        arriveState = 'sitting';
-        break;
-      }
-      case 'walking': {
-        zone = ev.targetZone;
-        arriveState = 'idle';
-        switch (ev.targetZone) {
-          case 'desk':
-            dest = desk.chair;
-            facing = desk.facing;
-            break;
-          case 'meeting_room': {
-            const seat = this.pickFreeSeat(a, MEETING_SEATS);
-            dest = seat.cell;
-            facing = seat.facing;
-            break;
-          }
-          case 'coffee_bar': {
-            const seat = this.pickFreeSeat(a, COFFEE_STANDS);
-            dest = seat.cell;
-            facing = seat.facing;
-            break;
-          }
-          case 'lounge': {
-            const seat = this.pickFreeSeat(a, LOUNGE_SEATS);
-            dest = seat.cell;
-            facing = seat.facing;
-            break;
-          }
-          case 'reception':
-            dest = RECEPTION_SPOT.cell;
-            facing = RECEPTION_SPOT.facing;
-            break;
-          case 'garden':
-            dest = GARDEN_SPOTS[0]!;
-            facing = a.goalFacing;
-            break;
-          default:
-            dest = desk.chair;
-            facing = desk.facing;
-            break;
-        }
-        break;
-      }
-      default:
-        return;
+      this.dynamicById.set(o.id, {
+        floor,
+        rect: { x0: fp.x0!, z0: fp.z0!, x1: fp.x1!, z1: fp.z1! },
+      });
     }
-
-    // Legal A* path from the current position (see task spec for the
-    // mid-walk retarget rule: continue to the next waypoint first).
-    let waypoints: GridPoint[];
-    if (a.path.length > 0) {
-      const from = a.path[0]!;
-      const seg = findPath(this.grid, from, dest);
-      waypoints = seg ? [from, ...seg.slice(1)] : [from];
-    } else {
-      const from = a.targetCell;
-      const seg = findPath(this.grid, from, dest);
-      waypoints = seg ? seg.slice(1) : [];
+    const rects: Record<FloorId, GridRect[]> = { 1: [], 2: [] };
+    for (const entry of this.dynamicById.values()) {
+      rects[entry.floor].push(entry.rect);
     }
-
-    a.zone = zone;
-    a.targetCell = dest;
-    a.goalFacing = facing;
-    this.pendingArrival.set(a.profile.id, {
-      zone,
-      cell: dest,
-      facing,
-      arriveState,
-      staySeconds: Number.POSITIVE_INFINITY,
-      thoughtBubble: ev.thoughtBubble,
-    });
-
-    if (waypoints.length === 0) {
-      // Already at the destination (or it is unreachable): arrive now.
-      this.pendingArrival.delete(a.profile.id);
-      a.path = [];
-      a.stayTimer = Number.POSITIVE_INFINITY;
-      this.setState(a, arriveState, ev.thoughtBubble);
-      this.emitView(a);
-      return;
-    }
-
-    a.path = waypoints;
-    this.setState(a, 'walking', undefined);
-    this.emitView(a);
+    this.floorGrids = {
+      1: applyDynamicObstacles(this.baseGrids[1], rects[1]),
+      2: applyDynamicObstacles(this.baseGrids[2], rects[2]),
+    };
+    this.replanAfterGridChange();
   }
 
-  private emitView(a: AgentRuntime) {
+  /** After a grid rebuild, walking agents replan from their next
+   *  waypoint; an agent whose destination became unreachable stops at
+   *  its next waypoint instead of clipping into the new obstacle. */
+  private replanAfterGridChange(): void {
+    for (const a of this.allAgents()) {
+      if (a.ride || a.path.length === 0) continue;
+      const grid = this.floorGrids[a.floor];
+      const next = a.path[0]!;
+      const destOk = isWalkable(grid, a.targetCell.gx, a.targetCell.gz);
+      const seg = destOk ? findPath(grid, next, a.targetCell) : null;
+      if (seg) {
+        a.path = [next, ...seg.slice(1)];
+        continue;
+      }
+      // Destination gone or unreachable: stop at the next waypoint if it
+      // is still walkable, otherwise at the nearest walkable cell.
+      this.pendingArrival.delete(a.profile.id);
+      this.pendingJourney.delete(a.profile.id);
+      if (isWalkable(grid, next.gx, next.gz)) {
+        a.targetCell = { ...next };
+        a.path = [next];
+      } else {
+        const safe = this.nearestWalkable(grid, worldToGrid(a.x, a.z));
+        a.targetCell = safe;
+        a.path = [{ ...safe }];
+      }
+    }
+  }
+
+  private nearestWalkable(grid: GridMap, from: GridPoint): GridPoint {
+    if (isWalkable(grid, from.gx, from.gz)) return { ...from };
+    for (let r = 1; r <= 3; r++) {
+      for (let dz = -r; dz <= r; dz++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const c = { gx: from.gx + dx, gz: from.gz + dz };
+          if (isWalkable(grid, c.gx, c.gz)) return c;
+        }
+      }
+    }
+    return { ...ELEVATOR_ENTRY };
+  }
+
+  /* ------------------------------ crowd ----------------------------- */
+
+  allAgents(): AgentRuntime[] {
+    return [...this.agents, ...this.crowd];
+  }
+
+  crowdAgents(): readonly AgentRuntime[] {
+    return this.crowd;
+  }
+
+  crowdCount(): number {
+    return this.crowd.length;
+  }
+
+  setCrowdCount(n: number): void {
+    const target = Math.max(0, Math.min(24, Math.floor(n)));
+    while (this.crowd.length < target) {
+      const i = this.crowd.length;
+      const spawn = CROWD_SPAWNS[i % CROWD_SPAWNS.length]!;
+      const w = gridToWorld(spawn.gx, spawn.gz);
+      this.crowd.push({
+        profile: crowdProfile(i),
+        x: w.x,
+        z: w.z,
+        facing: this.rng() * Math.PI * 2,
+        state: 'idle',
+        zone: 'garden',
+        thoughtBubble: null,
+        targetCell: { ...spawn },
+        path: [],
+        stayTimer: 1 + i * 0.7,
+        controlled: false,
+        floor: 1,
+        ride: null,
+        crowd: true,
+        moveBlend: 0,
+        walkPhase: 0,
+      });
+    }
+    if (this.crowd.length > target) this.crowd.length = target;
+  }
+
+  getAgent(id: string): AgentRuntime | undefined {
+    return (
+      this.agents.find((a) => a.profile.id === id) ??
+      this.crowd.find((a) => a.profile.id === id)
+    );
+  }
+
+  private emitView(a: AgentRuntime): void {
     this.onViewChange?.(a.profile.id, {
       state: a.state,
       zone: a.zone,
       thoughtBubble: a.thoughtBubble,
+      floor: a.floor,
     });
   }
 
-  private setState(a: AgentRuntime, state: AgentState, bubble?: string) {
-    if (a.state !== state || a.thoughtBubble !== bubble) {
-      a.state = state;
-      a.thoughtBubble = bubble;
-      this.emitView(a);
-    }
+  private setState(a: AgentRuntime, state: AgentState, bubble: string | null): void {
+    a.state = state;
+    a.thoughtBubble = bubble;
+    this.emitView(a);
   }
 
-  private chooseGoal(a: AgentRuntime): LifeGoal {
-    // Avoid two agents claiming the same seat cell.
-    const claimed = new Set(
-      this.agents.filter((o) => o !== a).map((o) => cellKey(o.targetCell)),
-    );
-    let goal = pickNextGoal(a.profile.deskIndex, this.rng, a.zone);
-    for (let attempt = 0; attempt < 3 && claimed.has(cellKey(goal.cell)); attempt++) {
-      goal = pickNextGoal(a.profile.deskIndex, this.rng, a.zone);
+  /* --------------------------- routing ------------------------------ */
+
+  /**
+   * Compute waypoints from the agent's current motion state to `dest`
+   * on the agent's CURRENT floor grid. Mid-walk, the agent always
+   * finishes its current segment first (no diagonal cutting through
+   * furniture). Returns [] when no movement is needed/possible.
+   */
+  private computeRoute(a: AgentRuntime, dest: GridPoint): GridPoint[] {
+    const grid = this.floorGrids[a.floor];
+    if (a.path.length > 0) {
+      const from = a.path[0]!;
+      const seg = findPath(grid, from, dest);
+      return seg ? [from, ...seg.slice(1)] : [from];
     }
-    if (claimed.has(cellKey(goal.cell))) {
-      const desk = DESKS[a.profile.deskIndex]!;
-      goal = {
-        zone: 'desk',
-        cell: desk.chair,
-        facing: desk.facing,
-        arriveState: 'typing',
-        staySeconds: 6,
-      };
-    }
-    return goal;
+    const seg = findPath(grid, a.targetCell, dest);
+    return seg ? seg.slice(1) : [];
   }
 
-  private depart(a: AgentRuntime) {
-    const goal = this.chooseGoal(a);
-    const from = a.targetCell;
-    const path = findPath(this.grid, from, goal.cell);
+  /**
+   * Send an agent toward a goal, routing through the elevator when the
+   * goal is on the other floor. The arrival state/bubble come from the
+   * goal once the agent actually gets there.
+   */
+  private routeTo(a: AgentRuntime, goal: LifeGoal): void {
     a.zone = goal.zone;
-    a.goalFacing = goal.facing;
-    if (!path || path.length <= 1) {
-      // Already there (or unreachable — stay put with the new behaviour).
-      a.targetCell = goal.cell;
-      a.stayTimer = goal.staySeconds;
-      this.setState(a, goal.arriveState, goal.thoughtBubble);
-      this.emitView(a);
+    if (goal.floor !== a.floor) {
+      this.pendingJourney.set(a.profile.id, goal);
+      const elevGoal: LifeGoal = {
+        zone: goal.zone,
+        floor: a.floor,
+        cell: { ...ELEVATOR_ENTRY },
+        facing: facingToward(ELEVATOR_ENTRY, { gx: 27, gz: 6 }),
+        arriveState: 'walking',
+        staySeconds: 0,
+      };
+      this.pendingArrival.set(a.profile.id, elevGoal);
+      this.beginWalk(a, ELEVATOR_ENTRY);
       return;
     }
-    a.path = path.slice(1); // first node is the current cell
-    a.targetCell = goal.cell;
-    a.stayTimer = goal.staySeconds;
-    a.thoughtBubble = undefined;
-    this.setState(a, 'walking', undefined);
-    this.emitView(a);
-    // Stash the arrival behaviour on the runtime via a side map keyed by agent id.
+    this.pendingJourney.delete(a.profile.id);
     this.pendingArrival.set(a.profile.id, goal);
+    this.beginWalk(a, goal.cell);
   }
 
-  private pendingArrival = new Map<string, LifeGoal>();
+  private beginWalk(a: AgentRuntime, dest: GridPoint): void {
+    const waypoints = this.computeRoute(a, dest);
+    a.targetCell = { ...dest };
+    if (waypoints.length === 0) {
+      a.path = [];
+      this.arrive(a);
+      return;
+    }
+    a.path = waypoints;
+    this.setState(a, 'walking', a.thoughtBubble);
+  }
 
-  /** Advance the whole world. `dtSeconds` is real frame delta; `speed` is 1|2|4. */
-  update(dtSeconds: number, speed: number) {
-    const dt = Math.min(dtSeconds, 0.05) * speed;
-    for (const a of this.agents) {
-      if (a.state === 'walking') {
-        this.updateWalking(a, dt);
-      } else {
-        a.moveBlend = Math.max(0, a.moveBlend - dt * 6);
-        a.facing = angleLerp(a.facing, a.goalFacing, TURN_SPEED * dt);
-        if (a.controlled) {
-          // Held by an external event: never hand off to lifeSim.
-          a.stayTimer -= dt;
-          if (a.stayTimer <= 0) a.stayTimer = Number.POSITIVE_INFINITY;
-        } else {
-          a.stayTimer -= dt;
-          if (a.stayTimer <= 0) this.depart(a);
+  private arrive(a: AgentRuntime): void {
+    const w = gridToWorld(a.targetCell.gx, a.targetCell.gz);
+    a.x = w.x;
+    a.z = w.z;
+    a.path = [];
+    // Elevator transfer point reached with a cross-floor goal pending?
+    const journey = this.pendingJourney.get(a.profile.id);
+    if (
+      journey &&
+      journey.floor !== a.floor &&
+      a.targetCell.gx === ELEVATOR_ENTRY.gx &&
+      a.targetCell.gz === ELEVATOR_ENTRY.gz
+    ) {
+      this.pendingArrival.delete(a.profile.id);
+      a.ride = { from: a.floor, to: journey.floor, t: 0, duration: RIDE_SECONDS };
+      this.setState(a, 'walking', 'Taking the elevator…');
+      return;
+    }
+    const goal = this.pendingArrival.get(a.profile.id);
+    this.pendingArrival.delete(a.profile.id);
+    if (goal) {
+      a.facing = goal.facing;
+      a.stayTimer = goal.staySeconds;
+      this.setState(a, goal.arriveState, goal.thoughtBubble ?? null);
+    } else {
+      a.stayTimer = 3;
+      this.setState(a, 'idle', null);
+    }
+  }
+
+  private finishRide(a: AgentRuntime): void {
+    const ride = a.ride!;
+    a.floor = ride.to;
+    a.ride = null;
+    a.targetCell = { ...ELEVATOR_ENTRY };
+    const w = gridToWorld(ELEVATOR_ENTRY.gx, ELEVATOR_ENTRY.gz);
+    a.x = w.x;
+    a.z = w.z;
+    this.emitView(a);
+    const journey = this.pendingJourney.get(a.profile.id);
+    this.pendingJourney.delete(a.profile.id);
+    if (journey) {
+      this.pendingArrival.set(a.profile.id, journey);
+      this.beginWalk(a, journey.cell);
+    } else {
+      a.stayTimer = 2;
+      this.setState(a, 'idle', null);
+    }
+  }
+
+  /* ------------------------- LIVE events ---------------------------- */
+
+  /**
+   * Apply a server event (Spec Section 7 Visual Mapping Law). External
+   * events take control of the agent until an `idle` event releases it
+   * back to the life simulator.
+   */
+  applyExternalEvent(event: WorldEvent): void {
+    const a = this.agents.find((x) => x.profile.id === event.agentId);
+    if (!a) return;
+    const desk = DESKS[a.profile.deskIndex]!;
+
+    if (event.state === 'idle') {
+      a.controlled = false;
+      this.pendingArrival.delete(a.profile.id);
+      this.pendingJourney.delete(a.profile.id);
+      if (a.ride) {
+        // Finish the ride instantly so control returns on a real floor.
+        a.floor = a.ride.to;
+        a.ride = null;
+        a.targetCell = { ...ELEVATOR_ENTRY };
+        const w = gridToWorld(ELEVATOR_ENTRY.gx, ELEVATOR_ENTRY.gz);
+        a.x = w.x;
+        a.z = w.z;
+      }
+      a.stayTimer = 1.5;
+      this.setState(a, 'idle', null);
+      return;
+    }
+
+    a.controlled = true;
+    a.zone = event.targetZone;
+
+    // In-place states: no movement.
+    if (event.state === 'celebrating' || event.state === 'error') {
+      a.path = [];
+      this.pendingArrival.delete(a.profile.id);
+      this.pendingJourney.delete(a.profile.id);
+      a.stayTimer = Number.POSITIVE_INFINITY;
+      this.setState(a, event.state, event.thoughtBubble ?? null);
+      return;
+    }
+
+    let dest: GridPoint = desk.chair;
+    let facing: number = desk.facing;
+    let floor: FloorId = 1;
+
+    if (event.state === 'meeting') {
+      const seat = this.pickFreeSeat(MEETING_SEATS, a) ?? MEETING_SEATS[0]!;
+      dest = seat.cell;
+      facing = seat.facing;
+    } else if (event.state === 'coffee_break') {
+      const stand =
+        this.pickFreeSeat(COFFEE_STANDS, a) ?? COFFEE_STANDS[0]!;
+      dest = stand.cell;
+      facing = stand.facing;
+    } else if (event.state === 'walking' || event.state === 'sitting') {
+      // Head to the zone named by the event (Phase 4: lab / executive
+      // resolve to Floor 2 seats and route via the elevator).
+      floor = zoneFloor(event.targetZone);
+      const seat = this.seatForZone(event.targetZone, a);
+      if (seat) {
+        dest = seat.cell;
+        facing = seat.facing;
+      }
+    }
+    // typing / thinking / tool_calling -> own desk (already the default).
+
+    const goal: LifeGoal = {
+      zone: event.targetZone,
+      floor,
+      cell: dest,
+      facing,
+      arriveState: event.state,
+      staySeconds: Number.POSITIVE_INFINITY,
+      thoughtBubble: event.thoughtBubble,
+    };
+    this.routeTo(a, goal);
+    // If the agent was already at the destination, arrive() has applied
+    // the event state; otherwise it applies on arrival. Either way the
+    // bubble shows immediately while walking.
+    if (a.state === 'walking') {
+      this.setState(a, 'walking', event.thoughtBubble ?? null);
+    }
+  }
+
+  private seatForZone(zone: TargetZone, self: AgentRuntime): Seat | null {
+    switch (zone) {
+      case 'desk': {
+        const d = DESKS[self.profile.deskIndex]!;
+        return { cell: d.chair, facing: d.facing };
+      }
+      case 'meeting_room':
+        return this.pickFreeSeat(MEETING_SEATS, self) ?? MEETING_SEATS[0]!;
+      case 'coffee_bar':
+        return this.pickFreeSeat(COFFEE_STANDS, self) ?? COFFEE_STANDS[0]!;
+      case 'lounge':
+        return this.pickFreeSeat(LOUNGE_SEATS, self) ?? LOUNGE_SEATS[0]!;
+      case 'lab':
+        return this.pickFreeSeat(LAB_SEATS, self) ?? LAB_SEATS[0]!;
+      case 'executive':
+        return this.pickFreeSeat(EXEC_SEATS, self) ?? EXEC_SEATS[0]!;
+      case 'reception':
+        return RECEPTION_SPOT;
+      case 'garden':
+        return null;
+    }
+  }
+
+  /** First seat not targeted by another agent (falls back to null). */
+  private pickFreeSeat(seats: readonly Seat[], self: AgentRuntime): Seat | null {
+    const taken = new Set(
+      this.allAgents()
+        .filter((x) => x !== self)
+        .map((x) => `${x.targetCell.gx},${x.targetCell.gz}`),
+    );
+    for (const s of seats) {
+      if (!taken.has(`${s.cell.gx},${s.cell.gz}`)) return s;
+    }
+    return null;
+  }
+
+  /* --------------------------- main loop ---------------------------- */
+
+  update(dt: number, speed: number): void {
+    const step = dt * speed;
+    for (const a of this.agents) this.tickAgent(a, step);
+    for (const a of this.crowd) this.tickAgent(a, step);
+  }
+
+  private tickAgent(a: AgentRuntime, step: number): void {
+    // Walk-cycle bookkeeping for the avatar pose driver.
+    const walkingNow = a.state === 'walking' && !a.ride;
+    a.moveBlend += ((walkingNow ? 1 : 0) - a.moveBlend) * Math.min(1, step * 8);
+    if (walkingNow) a.walkPhase += step * WALK_SPEED;
+    if (a.ride) {
+      a.ride.t += step / a.ride.duration;
+      if (a.ride.t >= 1) this.finishRide(a);
+      return;
+    }
+    if (a.state === 'walking') {
+      this.updateWalking(a, step);
+      return;
+    }
+    if (a.controlled) return; // LIVE events hold the agent until idle.
+    a.stayTimer -= step;
+    if (a.stayTimer <= 0) this.depart(a);
+  }
+
+  private updateWalking(a: AgentRuntime, dt: number): void {
+    let remaining = WALK_SPEED * dt;
+    while (remaining > 0) {
+      const next = a.path[0];
+      if (!next) {
+        this.arrive(a);
+        return;
+      }
+      const w = gridToWorld(next.gx, next.gz);
+      const dx = w.x - a.x;
+      const dz = w.z - a.z;
+      const dist = Math.hypot(dx, dz);
+      a.facing = Math.atan2(dx, dz);
+      if (dist <= Math.max(remaining, ARRIVE_EPS)) {
+        a.x = w.x;
+        a.z = w.z;
+        remaining -= dist;
+        a.path.shift();
+        if (a.path.length === 0) {
+          this.arrive(a);
+          return;
         }
+      } else {
+        a.x += (dx / dist) * remaining;
+        a.z += (dz / dist) * remaining;
+        remaining = 0;
       }
     }
   }
 
-  private updateWalking(a: AgentRuntime, dt: number) {
-    const next = a.path[0];
-    if (!next) {
-      this.arrive(a);
-      return;
-    }
-    const target = gridToWorld(next.gx, next.gz);
-    const dx = target.x - a.x;
-    const dz = target.z - a.z;
-    const dist = Math.hypot(dx, dz);
-    const step = WALK_SPEED * dt;
-    a.moveBlend = Math.min(1, a.moveBlend + dt * 6);
-    if (dist > 0.0001) {
-      a.facing = angleLerp(a.facing, Math.atan2(dx, dz), TURN_SPEED * dt);
-    }
-    if (dist <= step) {
-      a.x = target.x;
-      a.z = target.z;
-      a.walkPhase += dist;
-      a.path.shift();
-      if (a.path.length === 0) this.arrive(a);
-    } else {
-      a.x += (dx / dist) * step;
-      a.z += (dz / dist) * step;
-      a.walkPhase += step;
-    }
+  private depart(a: AgentRuntime): void {
+    const goal = a.crowd
+      ? this.chooseCrowdGoal(a)
+      : pickNextGoal(a.profile.deskIndex, this.rng, a.zone);
+    this.routeTo(a, goal);
   }
 
-  private arrive(a: AgentRuntime) {
-    const goal = this.pendingArrival.get(a.profile.id);
-    this.pendingArrival.delete(a.profile.id);
-    const w = gridToWorld(a.targetCell.gx, a.targetCell.gz);
-    a.x = w.x;
-    a.z = w.z;
-    if (goal) {
-      a.goalFacing = goal.facing;
-      a.stayTimer = goal.staySeconds;
-      this.setState(a, goal.arriveState, goal.thoughtBubble);
-    } else {
-      this.setState(a, 'idle', undefined);
-      a.stayTimer = 3;
+  /** Crowd guests wander public areas on both floors. */
+  private chooseCrowdGoal(a: AgentRuntime): LifeGoal {
+    const roll = this.rng();
+    if (roll < 0.3) {
+      const spot = GARDEN_SPOTS[Math.floor(this.rng() * GARDEN_SPOTS.length)]!;
+      return {
+        zone: 'garden',
+        floor: 1,
+        cell: spot,
+        facing: this.rng() * Math.PI * 2,
+        arriveState: 'idle',
+        staySeconds: 4 + this.rng() * 6,
+      };
     }
-    this.emitView(a);
+    if (roll < 0.5) {
+      const seat = this.pickFreeSeat(LOUNGE_SEATS, a) ?? LOUNGE_SEATS[0]!;
+      return {
+        zone: 'lounge',
+        floor: 1,
+        cell: seat.cell,
+        facing: seat.facing,
+        arriveState: 'sitting',
+        staySeconds: 5 + this.rng() * 6,
+      };
+    }
+    if (roll < 0.68) {
+      const stand = this.pickFreeSeat(COFFEE_STANDS, a) ?? COFFEE_STANDS[0]!;
+      return {
+        zone: 'coffee_bar',
+        floor: 1,
+        cell: stand.cell,
+        facing: stand.facing,
+        arriveState: 'coffee_break',
+        staySeconds: 3 + this.rng() * 4,
+      };
+    }
+    if (roll < 0.85) {
+      const seat = this.pickFreeSeat(LAB_SEATS, a) ?? LAB_SEATS[0]!;
+      return {
+        zone: 'lab',
+        floor: 2,
+        cell: seat.cell,
+        facing: seat.facing,
+        arriveState: 'typing',
+        staySeconds: 5 + this.rng() * 6,
+      };
+    }
+    const seat = this.pickFreeSeat(EXEC_SEATS, a) ?? EXEC_SEATS[0]!;
+    return {
+      zone: 'executive',
+      floor: 2,
+      cell: seat.cell,
+      facing: seat.facing,
+      arriveState: 'sitting',
+      staySeconds: 5 + this.rng() * 6,
+    };
   }
 }
 
-/** Singleton used by the render loop and avatars. */
 export const simulation = new Simulation();

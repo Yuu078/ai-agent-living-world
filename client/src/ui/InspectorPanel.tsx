@@ -27,6 +27,8 @@ const zoneLabel: Record<TargetZone, string> = {
   lounge: 'Lounge',
   reception: 'Reception',
   garden: 'Garden',
+  lab: 'R&D Lab (Floor 2)',
+  executive: 'Executive (Floor 2)',
 };
 
 const stateColor: Record<AgentState, string> = {

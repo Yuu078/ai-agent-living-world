@@ -28,6 +28,30 @@ function rectCenter(r: GridRect): { x: number; z: number; w: number; d: number }
   };
 }
 
+/** Walkway tiles as a single InstancedMesh (Phase 4 batching). */
+function PathTiles() {
+  const ref = useRef<THREE.InstancedMesh>(null!);
+  useLayoutEffect(() => {
+    const m = new THREE.Matrix4();
+    PATH_TILES.forEach((t, i) => {
+      const w = gridToWorld(t.gx, t.gz);
+      m.makeTranslation(w.x, 0.025, w.z);
+      ref.current.setMatrixAt(i, m);
+    });
+    ref.current.instanceMatrix.needsUpdate = true;
+  }, []);
+  return (
+    <instancedMesh
+      ref={ref}
+      args={[undefined, undefined, PATH_TILES.length]}
+      receiveShadow
+    >
+      <boxGeometry args={[0.98, 0.05, 0.98]} />
+      <meshStandardMaterial color="#cfc4ae" roughness={0.95} />
+    </instancedMesh>
+  );
+}
+
 function Trees() {
   const trunkRef = useRef<THREE.InstancedMesh>(null!);
   const canopyRef = useRef<THREE.InstancedMesh>(null!);
@@ -185,21 +209,9 @@ export default function CampusEnvironment() {
         <meshStandardMaterial color="#7fae5f" roughness={1} />
       </RoundedBox>
 
-      {/* walkway tiles */}
-      {PATH_TILES.map((t, i) => {
-        const w = gridToWorld(t.gx, t.gz);
-        return (
-          <RoundedBox
-            key={i}
-            args={[0.98, 0.05, 0.98]}
-            radius={0.02}
-            position={[w.x, 0.025, w.z]}
-            receiveShadow
-          >
-            <meshStandardMaterial color="#cfc4ae" roughness={0.95} />
-          </RoundedBox>
-        );
-      })}
+      {/* walkway tiles — Phase 4: one InstancedMesh instead of ~46
+          individual RoundedBoxes (same transforms, one draw call) */}
+      <PathTiles />
 
       <Trees />
       <Fountain />

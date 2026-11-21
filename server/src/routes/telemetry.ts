@@ -34,6 +34,8 @@ const TARGET_ZONES: readonly string[] = [
   'lounge',
   'reception',
   'garden',
+  'lab',
+  'executive',
 ];
 const EVENT_SOURCES: readonly string[] = ['internal', 'external_webhook'];
 

@@ -4,6 +4,7 @@ import TopBar from './ui/TopBar';
 import Sidebar from './ui/Sidebar';
 import TasksPanel from './ui/TasksPanel';
 import MeetingsPanel from './ui/MeetingsPanel';
+import BuildPanel from './ui/BuildPanel';
 import InspectorPanel from './ui/InspectorPanel';
 import BottomDock from './ui/BottomDock';
 import { useWorldStore } from './store/useWorldStore';
@@ -26,6 +27,7 @@ export default function App() {
         state: agent.state,
         zone: agent.zone,
         thoughtBubble: agent.thoughtBubble,
+        floor: agent.floor,
       });
     }
     return () => {
@@ -54,6 +56,8 @@ export default function App() {
             <TasksPanel />
           ) : activePanel === 'meetings' ? (
             <MeetingsPanel />
+          ) : activePanel === 'build' ? (
+            <BuildPanel />
           ) : (
             <Sidebar />
           )}

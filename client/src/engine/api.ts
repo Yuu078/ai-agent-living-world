@@ -9,6 +9,7 @@ import type {
   ChatMessagePayload,
   MeetingPayload,
   TaskPayload,
+  WorldObjectPayload,
   WorldStats,
 } from '@living-world/shared';
 
@@ -58,6 +59,17 @@ export const api = {
   startMeeting: (topic: string, participantIds: string[]) =>
     post<MeetingPayload>('/api/meetings', { topic, participantIds }),
   stats: () => req<WorldStats>('/api/stats'),
+  /* Phase 4 — Build Mode persistence (`world_objects` table).
+   * Server contract: GET returns `{ objects }`; POST takes a bulk
+   * `{ objects: [...] }` upsert and returns `{ saved }`. */
+  listWorld: async () =>
+    (await req<{ objects: WorldObjectPayload[] }>('/api/world')).objects,
+  saveWorldObject: (obj: WorldObjectPayload) =>
+    post<{ saved: number }>('/api/world', { objects: [obj] }),
+  deleteWorldObject: (id: string) =>
+    req<{ ok: boolean; id: string }>(`/api/world/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 };
 
 /** Trigger a browser download of an artifact's text content. */

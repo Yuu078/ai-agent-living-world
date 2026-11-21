@@ -69,8 +69,11 @@ async function waitForTask(id, timeoutMs = 300_000) {
 }
 
 /* --- 1. health ------------------------------------------------------------ */
+// Phase check loosened to >= 3 (following the Phase 3 precedent where
+// the gate2 health check was loosened to >= 2) so this gate keeps
+// passing as the server advances to Phase 4+.
 const health = (await get('/health')).body;
-check('GET /health reports phase 3', health.status === 'ok' && health.phase === 3, JSON.stringify(health));
+check('GET /health reports phase >= 3', health.status === 'ok' && health.phase >= 3, JSON.stringify(health));
 
 const statsBefore = (await get('/api/stats')).body;
 console.log(`INFO  total tokens before: ${statsBefore.totalTokens}`);

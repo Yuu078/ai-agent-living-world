@@ -6,11 +6,24 @@
  * defined here, so what you see is exactly what the pathfinder collides with.
  * Hard Rule 3: avatars can only stand on / travel through walkable cells.
  */
-import type { GridMap, GridPoint, TargetZone } from '@living-world/shared';
+import type {
+  FloorId,
+  FurnitureType,
+  GridMap,
+  GridPoint,
+  TargetZone,
+} from '@living-world/shared';
 
 export const GRID_W = 44;
 export const GRID_H = 34;
 export const CELL_SIZE = 1;
+
+/** Vertical distance between Floor 1 (y=0) and Floor 2. */
+export const FLOOR_HEIGHT = 3.4;
+
+export function floorY(floor: FloorId): number {
+  return floor === 2 ? FLOOR_HEIGHT : 0;
+}
 
 /** Grid cell -> world coordinates (cell center). */
 export function gridToWorld(gx: number, gz: number): { x: number; z: number } {
@@ -137,8 +150,7 @@ export const LOUNGE_SEATS: Seat[] = [
 ];
 
 /** Garden: fountain (3x3 obstacle) + benches + trees. */
-export const FOUNTAIN: GridRect = rect(34, 26, 36, 28);
-export const BENCHES: GridRect[] = [rect(31, 24, 32, 24), rect(38, 30, 39, 30)];
+export const FOUNTAIN: GridRect = rect(34, 26, 36, 28);export const BENCHES: GridRect[] = [rect(31, 24, 32, 24), rect(38, 30, 39, 30)];
 export const TREES: GridPoint[] = [
   { gx: 2, gz: 3 },
   { gx: 3, gz: 10 },
@@ -182,6 +194,81 @@ export const PATH_TILES: GridPoint[] = (() => {
 })();
 
 /* ------------------------------------------------------------------ */
+/* Phase 4 — Elevator + Floor 2 (Executive & R&D Lab)                  */
+/*                                                                     */
+/* The elevator shaft sits in the NE corner at gx 27..28, gz 6..7 on   */
+/* BOTH floors. Three of its cells are solid shaft; the south-west     */
+/* cell (27,7) is the car entry — walkable on both floors and the      */
+/* transfer point for cross-floor journeys.                            */
+/* ------------------------------------------------------------------ */
+export const ELEVATOR_ENTRY: GridPoint = { gx: 27, gz: 7 };
+export const ELEVATOR_SHAFT: GridRect = rect(27, 6, 28, 7);
+const SHAFT_BLOCKS: GridRect[] = [rect(27, 6, 28, 6), rect(28, 7, 28, 7)];
+
+/** Floor 2 walls: full perimeter (no exterior doors upstairs) + a glass
+ *  partition at gx=12 between Executive (west) and Lab (east), with a
+ *  doorway gap at gz 12..13. */
+export const F2_WALLS: WallRect[] = [
+  { ...rect(6, 5, 29, 5), kind: 'solid' }, // north
+  { ...rect(6, 22, 29, 22), kind: 'solid' }, // south
+  { ...rect(6, 5, 6, 22), kind: 'solid' }, // west
+  { ...rect(29, 5, 29, 22), kind: 'solid' }, // east
+  { ...rect(12, 5, 12, 11), kind: 'glass' }, // partition (north of doorway)
+  { ...rect(12, 14, 12, 22), kind: 'glass' }, // partition (south of doorway)
+];
+export const F2_DOORWAY: GridPoint[] = [
+  { gx: 12, gz: 12 },
+  { gx: 12, gz: 13 },
+];
+
+/** Executive office (Floor 2 west): desk + sofa corner. */
+export const EXEC_DESK: DeskDef = (() => {
+  const chair = { gx: 8, gz: 7 };
+  return {
+    footprint: rect(8, 6, 9, 6),
+    chair,
+    facing: facingToward(chair, { gx: 8, gz: 6 }),
+  };
+})();
+export const EXEC_SOFA: GridRect = rect(8, 17, 10, 17);
+export const EXEC_SOFA_SEATS: Seat[] = [8, 9, 10].map((gx) => ({
+  cell: { gx, gz: 16 },
+  facing: facingToward({ gx, gz: 16 }, { gx, gz: 17 }),
+}));
+export const EXEC_SEATS: Seat[] = [
+  { cell: EXEC_DESK.chair, facing: EXEC_DESK.facing },
+  ...EXEC_SOFA_SEATS,
+];
+
+/** R&D Lab (Floor 2 east): two benches with stools + a storage shelf. */
+export const LAB_BENCH_1: GridRect = rect(15, 9, 17, 9);
+export const LAB_BENCH_2: GridRect = rect(21, 9, 23, 9);
+export const LAB_SHELF: GridRect = rect(15, 20, 17, 20);
+export const LAB_SEATS: Seat[] = [LAB_BENCH_1, LAB_BENCH_2].flatMap((bench) =>
+  [bench.x0, bench.x0 + 1, bench.x1].map((gx) => ({
+    cell: { gx, gz: bench.z0 + 1 },
+    facing: facingToward({ gx, gz: bench.z0 + 1 }, { gx, gz: bench.z0 }),
+  })),
+);
+
+/** Which floor a zone lives on. */
+export function zoneFloor(zone: TargetZone): FloorId {
+  return zone === 'lab' || zone === 'executive' ? 2 : 1;
+}
+
+function floor2ObstacleRects(): GridRect[] {
+  return [
+    ...F2_WALLS,
+    ...SHAFT_BLOCKS,
+    EXEC_DESK.footprint,
+    EXEC_SOFA,
+    LAB_BENCH_1,
+    LAB_BENCH_2,
+    LAB_SHELF,
+  ];
+}
+
+/* ------------------------------------------------------------------ */
 /* Obstacle grid                                                       */
 /* ------------------------------------------------------------------ */
 function allObstacleRects(): GridRect[] {
@@ -192,6 +279,7 @@ function allObstacleRects(): GridRect[] {
     rect(0, 0, 0, GRID_H - 1),
     rect(GRID_W - 1, 0, GRID_W - 1, GRID_H - 1),
     ...WALLS,
+    ...SHAFT_BLOCKS,
     ...DESKS.map((d) => d.footprint),
     MEETING_TABLE,
     COFFEE_COUNTER,
@@ -203,15 +291,31 @@ function allObstacleRects(): GridRect[] {
   ];
 }
 
-export function buildGridMap(): GridMap {
-  const blocked = new Uint8Array(GRID_W * GRID_H);
-  for (const r of allObstacleRects()) {
-    for (let gz = r.z0; gz <= r.z1; gz++) {
-      for (let gx = r.x0; gx <= r.x1; gx++) {
+function blockRect(blocked: Uint8Array, r: GridRect): void {
+  for (let gz = r.z0; gz <= r.z1; gz++) {
+    for (let gx = r.x0; gx <= r.x1; gx++) {
+      if (gx >= 0 && gz >= 0 && gx < GRID_W && gz < GRID_H) {
         blocked[gz * GRID_W + gx] = 1;
       }
     }
   }
+}
+
+export function buildGridMap(floor: FloorId = 1): GridMap {
+  const blocked = new Uint8Array(GRID_W * GRID_H);
+  if (floor === 2) {
+    // Floor 2 exists only inside the building footprint: start fully
+    // blocked, carve the interior, then re-block walls + furniture.
+    blocked.fill(1);
+    for (let gz = 6; gz <= 21; gz++) {
+      for (let gx = 7; gx <= 28; gx++) {
+        blocked[gz * GRID_W + gx] = 0;
+      }
+    }
+    for (const r of floor2ObstacleRects()) blockRect(blocked, r);
+    return { width: GRID_W, height: GRID_H, cellSize: CELL_SIZE, blocked };
+  }
+  for (const r of allObstacleRects()) blockRect(blocked, r);
   return { width: GRID_W, height: GRID_H, cellSize: CELL_SIZE, blocked };
 }
 
@@ -235,5 +339,191 @@ export function zoneCells(zone: TargetZone): GridPoint[] {
       return GARDEN_SPOTS;
     case 'desk':
       return DESKS.map((d) => d.chair);
+    case 'lab':
+      return LAB_SEATS.map((s) => s.cell);
+    case 'executive':
+      return EXEC_SEATS.map((s) => s.cell);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 4 — Build Mode: furniture footprints, dynamic obstacles,      */
+/* placement validation (collision + reachability).                    */
+/* ------------------------------------------------------------------ */
+
+export interface FurnitureDef {
+  /** Footprint width (gx) at rotation step 0. */
+  w: number;
+  /** Footprint depth (gz) at rotation step 0. */
+  d: number;
+  label: string;
+}
+
+export const FURNITURE_DEFS: Record<FurnitureType, FurnitureDef> = {
+  desk: { w: 2, d: 1, label: 'Desk' },
+  table: { w: 2, d: 2, label: 'Table' },
+  plant: { w: 1, d: 1, label: 'Plant' },
+  bookshelf: { w: 2, d: 1, label: 'Bookshelf' },
+  sofa: { w: 3, d: 1, label: 'Sofa' },
+  whiteboard: { w: 2, d: 1, label: 'Whiteboard' },
+};
+
+/** Rotation is quarter turns (0..3); odd steps swap width/depth. */
+export function footprintFor(
+  type: FurnitureType,
+  gx: number,
+  gz: number,
+  rotSteps: number,
+): GridRect {
+  const def = FURNITURE_DEFS[type];
+  const swap = ((rotSteps % 4) + 4) % 4 % 2 === 1;
+  const w = swap ? def.d : def.w;
+  const d = swap ? def.w : def.d;
+  return rect(gx, gz, gx + w - 1, gz + d - 1);
+}
+
+export function rectCells(r: GridRect): GridPoint[] {
+  const cells: GridPoint[] = [];
+  for (let gz = r.z0; gz <= r.z1; gz++) {
+    for (let gx = r.x0; gx <= r.x1; gx++) {
+      cells.push({ gx, gz });
+    }
+  }
+  return cells;
+}
+
+export const cellKeyOf = (c: GridPoint): string => `${c.gx},${c.gz}`;
+
+/** Return a NEW grid with `rects` blocked (the input grid is untouched). */
+export function applyDynamicObstacles(grid: GridMap, rects: readonly GridRect[]): GridMap {
+  const blocked = new Uint8Array(grid.blocked);
+  for (const r of rects) blockRect(blocked, r);
+  return { width: grid.width, height: grid.height, cellSize: grid.cellSize, blocked };
+}
+
+/**
+ * Cells Build Mode may never cover on a floor: the elevator entry and
+ * doorway, exterior door gaps, and every zone seat / desk chair (agents
+ * must always be able to stand where the world sends them).
+ */
+export function protectedCells(floor: FloorId): Set<string> {
+  const set = new Set<string>();
+  const add = (c: GridPoint) => set.add(cellKeyOf(c));
+  add(ELEVATOR_ENTRY);
+  if (floor === 1) {
+    // exterior door gaps + meeting-room door gap (wall cells are already
+    // blocked; these are the walkable cells inside the gaps)
+    add({ gx: 16, gz: 22 });
+    add({ gx: 17, gz: 22 });
+    add({ gx: 29, gz: 13 });
+    add({ gx: 29, gz: 14 });
+    add({ gx: 13, gz: 8 });
+    for (const z of TARGET_ZONES_ALL) {
+      if (zoneFloor(z) === 1) for (const c of zoneCells(z)) add(c);
+    }
+  } else {
+    for (const c of F2_DOORWAY) add(c);
+    for (const z of TARGET_ZONES_ALL) {
+      if (zoneFloor(z) === 2) for (const c of zoneCells(z)) add(c);
+    }
+  }
+  return set;
+}
+
+const TARGET_ZONES_ALL: readonly TargetZone[] = [
+  'desk',
+  'meeting_room',
+  'coffee_bar',
+  'lounge',
+  'reception',
+  'garden',
+  'lab',
+  'executive',
+];
+
+/** Cells that must stay reachable from the floor anchor after any edit. */
+function criticalCells(floor: FloorId): GridPoint[] {
+  const cells: GridPoint[] = [ELEVATOR_ENTRY];
+  for (const z of TARGET_ZONES_ALL) {
+    if (zoneFloor(z) === floor) cells.push(...zoneCells(z));
+  }
+  return cells;
+}
+
+function floorAnchor(floor: FloorId): GridPoint {
+  // Floor 1: just inside the main entrance. Floor 2: the elevator entry.
+  return floor === 1 ? { gx: 16, gz: 21 } : { ...ELEVATOR_ENTRY };
+}
+
+export type PlaceFailReason =
+  | 'out_of_bounds'
+  | 'occupied'
+  | 'protected'
+  | 'agent'
+  | 'disconnects';
+
+export interface PlaceCheck {
+  ok: boolean;
+  reason?: PlaceFailReason;
+}
+
+/**
+ * Validate a candidate footprint on a floor's CURRENT grid (base +
+ * already-placed objects). A placement is legal only when every cell is
+ * in bounds and walkable, no protected/agent cell is covered, and every
+ * zone seat + the elevator stays reachable afterwards (flood fill), so
+ * Build Mode can never wall the office off (Hard Rule 3).
+ */
+export function checkPlacement(
+  grid: GridMap,
+  floor: FloorId,
+  candidate: GridRect,
+  extraBlockedCells?: ReadonlySet<string>,
+): PlaceCheck {
+  const cells = rectCells(candidate);
+  for (const c of cells) {
+    if (c.gx < 0 || c.gz < 0 || c.gx >= grid.width || c.gz >= grid.height) {
+      return { ok: false, reason: 'out_of_bounds' };
+    }
+  }
+  const prot = protectedCells(floor);
+  for (const c of cells) {
+    if (!isWalkable(grid, c.gx, c.gz)) return { ok: false, reason: 'occupied' };
+    if (prot.has(cellKeyOf(c))) return { ok: false, reason: 'protected' };
+    if (extraBlockedCells?.has(cellKeyOf(c))) return { ok: false, reason: 'agent' };
+  }
+  // Reachability: flood fill the tentative grid from the floor anchor.
+  const tentative = applyDynamicObstacles(grid, [candidate]);
+  const anchor = floorAnchor(floor);
+  if (!isWalkable(tentative, anchor.gx, anchor.gz)) {
+    return { ok: false, reason: 'disconnects' };
+  }
+  const seen = new Uint8Array(tentative.width * tentative.height);
+  const stack: GridPoint[] = [anchor];
+  seen[anchor.gz * tentative.width + anchor.gx] = 1;
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    for (const [dx, dz] of DIRS4) {
+      const nx = cur.gx + dx;
+      const nz = cur.gz + dz;
+      if (!isWalkable(tentative, nx, nz)) continue;
+      const idx = nz * tentative.width + nx;
+      if (seen[idx]) continue;
+      seen[idx] = 1;
+      stack.push({ gx: nx, gz: nz });
+    }
+  }
+  for (const c of criticalCells(floor)) {
+    if (!seen[c.gz * tentative.width + c.gx]) {
+      return { ok: false, reason: 'disconnects' };
+    }
+  }
+  return { ok: true };
+}
+
+const DIRS4: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];

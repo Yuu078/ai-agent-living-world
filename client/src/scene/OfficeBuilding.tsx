@@ -68,7 +68,9 @@ export default function OfficeBuilding() {
     }
     if (roofRef.current) {
       roofRef.current.position.y = 3.05 + t * 2.2;
-      roofRef.current.visible = t < 0.98;
+      // Phase 4: the Floor 1 roof must not cover Floor 2's slab view.
+      roofRef.current.visible =
+        t < 0.98 && useWorldStore.getState().activeFloor === 1;
     }
     if (roofMatRef.current) {
       roofMatRef.current.transparent = t > 0.01;

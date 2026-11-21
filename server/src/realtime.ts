@@ -12,6 +12,7 @@ import type { WorldEvent } from '@living-world/shared';
 // Mirror of AGENT_STATE_CHANGE_EVENT in shared/types.ts (runtime const
 // is duplicated locally because the server imports shared types only).
 export const AGENT_STATE_CHANGE_EVENT = 'agent:state_change';
+export const WORLD_OBJECTS_CHANGED_EVENT = 'world:objects_changed';
 
 let io: Server | null = null;
 
@@ -35,4 +36,9 @@ export function getRealtime(): Server | null {
 /** Broadcast a world event to all connected clients (no-op pre-init). */
 export function emitStateChange(event: WorldEvent): void {
   io?.emit(AGENT_STATE_CHANGE_EVENT, event);
+}
+
+/** Broadcast the full world-objects list after a layout change (no-op pre-init). */
+export function emitWorldObjectsChanged(objects: unknown[]): void {
+  io?.emit(WORLD_OBJECTS_CHANGED_EVENT, { objects });
 }

@@ -1,4 +1,4 @@
-import { ClipboardList, Lock, Users } from 'lucide-react';
+import { ClipboardList, Hammer, Lock, Users } from 'lucide-react';
 import type { AgentState } from '@living-world/shared';
 import { useWorldStore } from '../store/useWorldStore';
 import { useDataStore } from '../store/useDataStore';
@@ -30,10 +30,7 @@ const stateColor: Record<AgentState, string> = {
   celebrating: '#9ca3af',
 };
 
-const UPCOMING_FEATURES: readonly string[] = [
-  'Build Mode — Phase 4',
-  'Logs — Phase 2',
-];
+const UPCOMING_FEATURES: readonly string[] = ['Logs — Phase 2'];
 
 export default function Sidebar() {
   const setActivePanel = useDataStore((s) => s.setActivePanel);
@@ -45,6 +42,9 @@ export default function Sidebar() {
   const setCameraPreset = useWorldStore((s) => s.setCameraPreset);
   const cutaway = useWorldStore((s) => s.cutaway);
   const setCutaway = useWorldStore((s) => s.setCutaway);
+  const activeFloor = useWorldStore((s) => s.activeFloor);
+  const setActiveFloor = useWorldStore((s) => s.setActiveFloor);
+  const setBuildMode = useWorldStore((s) => s.setBuildMode);
 
   const handleAgentClick = (id: string) => {
     selectAgent(id);
@@ -88,6 +88,11 @@ export default function Sidebar() {
                     </span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
+                    {agentViews[profile.id]?.floor === 2 && (
+                      <span className="rounded bg-sky-500/30 px-1 text-[10px] font-semibold">
+                        F2
+                      </span>
+                    )}
                     <span className="text-[11px] opacity-80">
                       {stateLabel[state]}
                     </span>
@@ -108,6 +113,24 @@ export default function Sidebar() {
             WORLD
           </div>
           <div className="flex flex-col gap-1">
+            {/* Floor switcher (Phase 4) */}
+            <div className="mb-1 flex gap-1">
+              {([1, 2] as const).map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setActiveFloor(f)}
+                  className={`glass-button flex-1 rounded-lg px-3 py-1.5 text-sm ${
+                    activeFloor === f ? 'active' : ''
+                  }`}
+                >
+                  Floor {f}
+                  <span className="block text-[10px] opacity-70">
+                    {f === 1 ? 'Office' : 'Exec & Lab'}
+                  </span>
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               onClick={() => setCameraPreset('isometric')}
@@ -158,6 +181,17 @@ export default function Sidebar() {
             >
               <Users className="h-4 w-4 shrink-0" />
               Meetings — Live Discussion
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setBuildMode(true);
+                setActivePanel('build');
+              }}
+              className="glass-button flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm"
+            >
+              <Hammer className="h-4 w-4 shrink-0" />
+              Build Mode — Place Furniture
             </button>
           </div>
         </div>

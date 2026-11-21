@@ -1,5 +1,10 @@
 import { create } from 'zustand';
-import type { AppMode, CameraPreset } from '@living-world/shared';
+import type {
+  AppMode,
+  CameraPreset,
+  FloorId,
+  QualityPreset,
+} from '@living-world/shared';
 import type { AgentView } from '../engine/simulation';
 
 /**
@@ -25,6 +30,21 @@ interface WorldStore {
   setCutaway: (v: boolean) => void;
   selectedAgentId: string | null;
   selectAgent: (id: string | null) => void;
+  /** Phase 4: which floor the scene is showing. */
+  activeFloor: FloorId;
+  setActiveFloor: (f: FloorId) => void;
+  /** Phase 4: Build Mode (furniture placement) on/off. */
+  buildMode: boolean;
+  setBuildMode: (v: boolean) => void;
+  /** Phase 4: rendering quality preset. */
+  quality: QualityPreset;
+  setQuality: (q: QualityPreset) => void;
+  /** Phase 4: guest crowd (instanced agents) on/off. */
+  crowdEnabled: boolean;
+  setCrowdEnabled: (v: boolean) => void;
+  /** Phase 4: measured render FPS (1 Hz). */
+  fps: number;
+  setFps: (fps: number) => void;
   agentViews: Record<string, AgentView>;
   syncAgentView: (id: string, view: AgentView) => void;
   /** World clock: sim minutes elapsed since mount (drives TopBar clock). */
@@ -58,6 +78,16 @@ export const useWorldStore = create<WorldStore>((set) => ({
   setCutaway: (cutaway) => set({ cutaway }),
   selectedAgentId: null,
   selectAgent: (selectedAgentId) => set({ selectedAgentId }),
+  activeFloor: 1,
+  setActiveFloor: (activeFloor) => set({ activeFloor }),
+  buildMode: false,
+  setBuildMode: (buildMode) => set({ buildMode }),
+  quality: 'auto',
+  setQuality: (quality) => set({ quality }),
+  crowdEnabled: false,
+  setCrowdEnabled: (crowdEnabled) => set({ crowdEnabled }),
+  fps: 0,
+  setFps: (fps) => set({ fps }),
   agentViews: {},
   syncAgentView: (id, view) =>
     set((s) => {
@@ -66,7 +96,8 @@ export const useWorldStore = create<WorldStore>((set) => ({
         prev &&
         prev.state === view.state &&
         prev.zone === view.zone &&
-        prev.thoughtBubble === view.thoughtBubble
+        prev.thoughtBubble === view.thoughtBubble &&
+        prev.floor === view.floor
       ) {
         return s;
       }

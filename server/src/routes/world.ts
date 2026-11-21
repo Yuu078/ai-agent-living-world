@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db/index.js';
 import { worldObjects } from '../db/schema.js';
+import { emitWorldObjectsChanged } from '../realtime.js';
 
 type WorldObjectRow = typeof worldObjects.$inferSelect;
 
@@ -117,6 +118,8 @@ export default async function worldRoutes(app: FastifyInstance): Promise<void> {
         })
         .run();
     }
+    const allRows = db.select().from(worldObjects).all();
+    emitWorldObjectsChanged(allRows.map(toDto));
     return { saved: rows.length };
   });
 
@@ -128,6 +131,8 @@ export default async function worldRoutes(app: FastifyInstance): Promise<void> {
       .get();
     if (!existing) return reply.code(404).send({ error: 'world object not found' });
     db.delete(worldObjects).where(eq(worldObjects.id, req.params.id)).run();
+    const allRows = db.select().from(worldObjects).all();
+    emitWorldObjectsChanged(allRows.map(toDto));
     return { ok: true, id: req.params.id };
   });
 }

@@ -13,6 +13,7 @@
 import { randomBytes } from 'node:crypto';
 import { db } from '../db/index.js';
 import { artifacts } from '../db/schema.js';
+import { stripThinkTags } from './llmAdapter.js';
 
 export interface ArtifactInput {
   taskId?: string | null;
@@ -40,7 +41,7 @@ export function writeArtifact(input: ArtifactInput): ArtifactRecord {
     agentId: input.agentId ?? null,
     filename: input.filename,
     mimeType: input.mimeType ?? 'text/markdown',
-    contentText: input.contentText,
+    contentText: stripThinkTags(input.contentText),
     createdAt: Date.now(),
   };
   db.insert(artifacts)

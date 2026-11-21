@@ -80,6 +80,22 @@ export interface ChatOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Strip `<think>…</think>` scratchpad blocks from LLM output.
+ *
+ * Some OpenAI-compatible reasoning models (e.g. MiniMax-M2.7 on
+ * Dahl) inline their scratchpad in `content` as <think>…</think>.
+ * That scratchpad is not the answer: strip complete think blocks,
+ * and drop a trailing unclosed one (truncated mid-thought). If
+ * nothing but thought remains, the result is honestly empty.
+ */
+export function stripThinkTags(text: string): string {
+  let content = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  const danglingThink = content.indexOf('<think>');
+  if (danglingThink >= 0) content = content.slice(0, danglingThink).trim();
+  return content;
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -164,14 +180,7 @@ export async function chatCompletion(opts: ChatOptions): Promise<ChatResult> {
   }
 
   const rawContent = completion.choices?.[0]?.message?.content?.trim() ?? '';
-  // Some OpenAI-compatible reasoning models (e.g. MiniMax-M2.7 on
-  // Dahl) inline their scratchpad in `content` as <think>…</think>.
-  // That scratchpad is not the answer: strip complete think blocks,
-  // and drop a trailing unclosed one (truncated mid-thought). If
-  // nothing but thought remains, the response is honestly empty.
-  let content = rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-  const danglingThink = content.indexOf('<think>');
-  if (danglingThink >= 0) content = content.slice(0, danglingThink).trim();
+  const content = stripThinkTags(rawContent);
   if (!content) {
     throw new LlmError(
       `LLM returned an empty response (model: ${completion.model ?? model})`,

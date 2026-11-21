@@ -6,11 +6,18 @@
  * sit in the lounge, wander the garden — WITHOUT calling any LLM API.
  * This is DEMO_MODE behaviour only; LIVE_MODE tasks (Phase 3) pre-empt it.
  */
-import type { AgentState, GridPoint, TargetZone } from '@living-world/shared';
+import type {
+  AgentState,
+  FloorId,
+  GridPoint,
+  TargetZone,
+} from '@living-world/shared';
 import {
   COFFEE_STANDS,
   DESKS,
+  EXEC_SEATS,
   GARDEN_SPOTS,
+  LAB_SEATS,
   LOUNGE_SEATS,
   MEETING_SEATS,
   RECEPTION_SPOT,
@@ -20,6 +27,8 @@ import {
 export interface LifeGoal {
   zone: TargetZone;
   cell: GridPoint;
+  /** Floor the goal cell lives on (Phase 4 multi-floor). */
+  floor: FloorId;
   /** Facing (rotation Y) once arrived. */
   facing: number;
   /** State to play while staying at the goal. */
@@ -63,6 +72,7 @@ export function pickNextGoal(deskIndex: number, rng: Rng, currentZone: TargetZon
     const thinking = rng() < 0.3;
     return {
       zone: 'desk',
+      floor: 1,
       cell: desk.chair,
       facing: desk.facing,
       arriveState: thinking ? 'thinking' : 'typing',
@@ -75,6 +85,7 @@ export function pickNextGoal(deskIndex: number, rng: Rng, currentZone: TargetZon
     const stand: Seat = pick(rng, COFFEE_STANDS);
     return {
       zone: 'coffee_bar',
+      floor: 1,
       cell: stand.cell,
       facing: stand.facing,
       arriveState: 'coffee_break',
@@ -87,6 +98,7 @@ export function pickNextGoal(deskIndex: number, rng: Rng, currentZone: TargetZon
     const seat: Seat = pick(rng, LOUNGE_SEATS);
     return {
       zone: 'lounge',
+      floor: 1,
       cell: seat.cell,
       facing: seat.facing,
       arriveState: 'sitting',
@@ -94,13 +106,40 @@ export function pickNextGoal(deskIndex: number, rng: Rng, currentZone: TargetZon
     };
   }
   // Garden stroll.
-  if (roll < 0.92) {
+  if (roll < 0.88) {
     return {
       zone: 'garden',
+      floor: 1,
       cell: pick(rng, GARDEN_SPOTS),
       facing: rng() * Math.PI * 2,
       arriveState: 'idle',
       staySeconds: 4 + rng() * 5,
+    };
+  }
+  // Floor 2: R&D lab work or the executive office (Phase 4 — the
+  // simulation routes these through the elevator automatically).
+  if (roll < 0.94) {
+    if (rng() < 0.55) {
+      const seat: Seat = pick(rng, LAB_SEATS);
+      return {
+        zone: 'lab',
+        floor: 2,
+        cell: seat.cell,
+        facing: seat.facing,
+        arriveState: 'typing',
+        staySeconds: 6 + rng() * 7,
+        thoughtBubble: 'Running experiments in the R&D lab…',
+      };
+    }
+    const seat: Seat = pick(rng, EXEC_SEATS);
+    return {
+      zone: 'executive',
+      floor: 2,
+      cell: seat.cell,
+      facing: seat.facing,
+      arriveState: 'sitting',
+      staySeconds: 5 + rng() * 6,
+      thoughtBubble: 'Reviewing strategy upstairs…',
     };
   }
   // Occasionally drift to the meeting room or reception.
@@ -108,6 +147,7 @@ export function pickNextGoal(deskIndex: number, rng: Rng, currentZone: TargetZon
     const seat: Seat = pick(rng, MEETING_SEATS);
     return {
       zone: 'meeting_room',
+      floor: 1,
       cell: seat.cell,
       facing: seat.facing,
       arriveState: 'meeting',
@@ -117,6 +157,7 @@ export function pickNextGoal(deskIndex: number, rng: Rng, currentZone: TargetZon
   }
   return {
     zone: 'reception',
+    floor: 1,
     cell: RECEPTION_SPOT.cell,
     facing: RECEPTION_SPOT.facing,
     arriveState: 'idle',

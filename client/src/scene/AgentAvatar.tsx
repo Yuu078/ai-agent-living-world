@@ -4,6 +4,7 @@ import { useFrame } from '@react-three/fiber';
 import { Html, RoundedBox } from '@react-three/drei';
 import { simulation } from '../engine/simulation';
 import { AGENT_PROFILES } from '../engine/agents';
+import { floorY } from '../engine/worldLayout';
 import { useWorldStore } from '../store/useWorldStore';
 import type { AgentState } from '@living-world/shared';
 
@@ -43,6 +44,10 @@ export default function AgentAvatar({ agentId }: { agentId: string }) {
   );
   const selectAgent = useWorldStore((s) => s.selectAgent);
   const view = useWorldStore((s) => s.agentViews[agentId]);
+  // Phase 4: drei Html labels ignore group visibility, so gate them in
+  // React — an agent upstairs must not leak its label into Floor 1.
+  const activeFloor = useWorldStore((s) => s.activeFloor);
+  const showLabels = (view?.floor ?? 1) === activeFloor;
 
   const root = useRef<THREE.Group>(null!);
   const body = useRef<THREE.Group>(null!);
@@ -79,9 +84,21 @@ export default function AgentAvatar({ agentId }: { agentId: string }) {
     sitT.current = damp(sitT.current, sitting ? 1 : 0, 10, delta);
     const sit = sitT.current;
 
+    // Phase 4: floor height + elevator-ride interpolation + floor gating
+    // (an avatar is only drawn on the floor the user is viewing; during
+    // a ride it is drawn on both endpoint floors).
+    const activeFloor = useWorldStore.getState().activeFloor;
+    let y = floorY(rt.floor);
+    let floorVisible = rt.floor === activeFloor;
+    if (rt.ride) {
+      y = THREE.MathUtils.lerp(floorY(rt.ride.from), floorY(rt.ride.to), rt.ride.t);
+      floorVisible =
+        activeFloor === rt.ride.from || activeFloor === rt.ride.to;
+    }
+    root.current.visible = floorVisible;
+
     // root position + facing (+ celebration jump / error shake)
-    let y = 0;
-    if (rt.state === 'celebrating') y = Math.abs(Math.sin(t * 6)) * 0.18;
+    if (rt.state === 'celebrating') y += Math.abs(Math.sin(t * 6)) * 0.18;
     const shakeX = rt.state === 'error' ? Math.sin(t * 30) * 0.012 : 0;
     root.current.position.set(rt.x + shakeX, y, rt.z);
     root.current.rotation.y = rt.facing;
@@ -254,6 +271,7 @@ export default function AgentAvatar({ agentId }: { agentId: string }) {
       </group>
 
       {/* name label */}
+      {showLabels && (
       <Html
         position={[0, 2.18, 0]}
         center
@@ -278,9 +296,10 @@ export default function AgentAvatar({ agentId }: { agentId: string }) {
           {profile.name}
         </div>
       </Html>
+      )}
 
       {/* thought bubble */}
-      {state !== 'idle' && bubble ? (
+      {showLabels && state !== 'idle' && bubble ? (
         <Html
           position={[0, 2.62, 0]}
           center

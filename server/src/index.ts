@@ -6,6 +6,8 @@
  * Socket.IO broadcast, and the POST /api/telemetry external bridge.
  * PHASE 3: live LLM orchestrator (POST /api/run, /api/chat,
  * /api/meetings, approval gate, /api/stats) — see engine/orchestrator.ts.
+ * PHASE 4: build mode + Floor 2 (executive & lab), world-objects
+ * broadcast, think-tag stripping on all artifact write paths.
  * All LLM keys and tool execution live here in server/ — never in
  * the frontend (Hard Rule 4).
  */
@@ -34,7 +36,7 @@ await app.register(cors, { origin: '*' });
 app.get('/health', async () => ({
   status: 'ok',
   service: 'ai-agent-living-world-server',
-  phase: 3,
+  phase: 4,
   timestamp: Date.now(),
 }));
 

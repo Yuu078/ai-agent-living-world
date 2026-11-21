@@ -4,11 +4,13 @@ import type {
   ChatMessagePayload,
   MeetingPayload,
   TaskPayload,
+  WorldObjectPayload,
   WorldStats,
 } from '@living-world/shared';
 import { api } from '../engine/api';
+import { simulation } from '../engine/simulation';
 
-export type LeftPanel = 'world' | 'tasks' | 'meetings';
+export type LeftPanel = 'world' | 'tasks' | 'meetings' | 'build';
 
 /**
  * Server-data store (Phase 3): tasks, artifacts, meetings, chat and
@@ -24,10 +26,13 @@ interface DataStore {
   meetings: MeetingPayload[];
   stats: WorldStats | null;
   chatByAgent: Record<string, ChatMessagePayload[]>;
+  /** Phase 4: persisted world objects (Build Mode + scene furniture). */
+  worldObjects: WorldObjectPayload[];
   refreshTasks: () => Promise<void>;
   refreshArtifacts: () => Promise<void>;
   refreshMeetings: () => Promise<void>;
   refreshStats: () => Promise<void>;
+  refreshWorld: () => Promise<void>;
   refreshAll: () => Promise<void>;
   loadChat: (agentId: string) => Promise<void>;
   setChat: (agentId: string, messages: ChatMessagePayload[]) => void;
@@ -49,6 +54,15 @@ export const useDataStore = create<DataStore>((set, get) => ({
   meetings: [],
   stats: null,
   chatByAgent: {},
+  worldObjects: [],
+  refreshWorld: () =>
+    quiet(async () => {
+      const objects = await api.listWorld();
+      set({ worldObjects: objects });
+      // Keep the pathfinding grids in sync with the persisted world —
+      // this is what makes a placed desk a real A* obstacle.
+      simulation.setDynamicObjects(objects);
+    }),
   refreshTasks: () =>
     quiet(async () => set({ tasks: await api.listTasks() })),
   refreshArtifacts: () =>
@@ -62,6 +76,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
       get().refreshArtifacts(),
       get().refreshMeetings(),
       get().refreshStats(),
+      get().refreshWorld(),
     ]);
   },
   loadChat: (agentId) =>

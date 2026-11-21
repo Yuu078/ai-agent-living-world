@@ -5,10 +5,20 @@ import {
   LayoutGrid,
   Orbit,
   Slice,
+  Sparkles,
+  Users,
   type LucideIcon,
 } from 'lucide-react';
-import type { CameraPreset } from '@living-world/shared';
+import type { CameraPreset, QualityPreset } from '@living-world/shared';
 import { useWorldStore } from '../store/useWorldStore';
+import { simulation } from '../engine/simulation';
+
+const QUALITY_OPTIONS: readonly { value: QualityPreset; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Med' },
+  { value: 'high', label: 'High' },
+  { value: 'auto', label: 'Auto' },
+];
 
 interface CameraPresetOption {
   preset: CameraPreset;
@@ -36,6 +46,17 @@ export default function BottomDock() {
   const setCutaway = useWorldStore((s) => s.setCutaway);
   const speed = useWorldStore((s) => s.speed);
   const setSpeed = useWorldStore((s) => s.setSpeed);
+  const quality = useWorldStore((s) => s.quality);
+  const setQuality = useWorldStore((s) => s.setQuality);
+  const crowdEnabled = useWorldStore((s) => s.crowdEnabled);
+  const setCrowdEnabled = useWorldStore((s) => s.setCrowdEnabled);
+  const fps = useWorldStore((s) => s.fps);
+
+  const toggleCrowd = () => {
+    const next = !crowdEnabled;
+    simulation.setCrowdCount(next ? 18 : 0);
+    setCrowdEnabled(next);
+  };
 
   return (
     <div className="glass rounded-full px-2 py-2">
@@ -87,6 +108,43 @@ export default function BottomDock() {
             </button>
           ))}
         </div>
+
+        <Separator />
+
+        {/* Quality presets (Phase 4) */}
+        <div className="flex items-center gap-1">
+          <Sparkles className="mx-1 h-4 w-4 opacity-80" />
+          {QUALITY_OPTIONS.map((q) => (
+            <button
+              key={q.value}
+              type="button"
+              onClick={() => setQuality(q.value)}
+              className={`glass-button rounded-full px-2.5 py-1.5 text-sm ${
+                quality === q.value ? 'active' : ''
+              }`}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+
+        <Separator />
+
+        {/* Crowd toggle + FPS (Phase 4) */}
+        <button
+          type="button"
+          onClick={toggleCrowd}
+          className={`glass-button flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm ${
+            crowdEnabled ? 'active' : ''
+          }`}
+          title="Toggle the guest crowd (instanced rendering)"
+        >
+          <Users className="h-4 w-4" />
+          Crowd
+        </button>
+        <span className="px-1 text-xs tabular-nums opacity-80">
+          {fps > 0 ? `${fps} FPS` : '— FPS'}
+        </span>
       </div>
     </div>
   );

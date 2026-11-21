@@ -9,6 +9,7 @@ import type { SQL } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db/index.js';
 import { artifacts } from '../db/schema.js';
+import { stripThinkTags } from '../engine/llmAdapter.js';
 
 type ArtifactRow = typeof artifacts.$inferSelect;
 
@@ -79,7 +80,7 @@ export default async function artifactsRoutes(app: FastifyInstance): Promise<voi
       agentId: isNonEmptyString(body.agentId) ? body.agentId : null,
       filename: body.filename as string,
       mimeType: body.mimeType as string,
-      contentText: body.contentText as string,
+      contentText: stripThinkTags(body.contentText as string),
       createdAt: Date.now(),
     };
     db.insert(artifacts).values(row).run();

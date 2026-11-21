@@ -273,6 +273,83 @@ function seedAgents(): void {
   }
 }
 
+interface Floor2WorldObjectSeed {
+  id: string;
+  type: string;
+  room: string;
+  gx: number;
+  gz: number;
+  footprint: { x0: number; z0: number; x1: number; z1: number };
+}
+
+const FLOOR2_WORLD_OBJECT_SEEDS: Floor2WorldObjectSeed[] = [
+  {
+    id: 'world2-exec-desk',
+    type: 'desk',
+    room: 'executive',
+    gx: 8,
+    gz: 6,
+    footprint: { x0: 8, z0: 6, x1: 9, z1: 6 },
+  },
+  {
+    id: 'world2-exec-sofa',
+    type: 'lounge_sofa',
+    room: 'executive',
+    gx: 8,
+    gz: 17,
+    footprint: { x0: 8, z0: 17, x1: 10, z1: 17 },
+  },
+  {
+    id: 'world2-lab-bench-1',
+    type: 'lab_bench',
+    room: 'lab',
+    gx: 15,
+    gz: 9,
+    footprint: { x0: 15, z0: 9, x1: 17, z1: 9 },
+  },
+  {
+    id: 'world2-lab-bench-2',
+    type: 'lab_bench',
+    room: 'lab',
+    gx: 21,
+    gz: 9,
+    footprint: { x0: 21, z0: 9, x1: 23, z1: 9 },
+  },
+  {
+    id: 'world2-lab-shelf',
+    type: 'bookshelf',
+    room: 'lab',
+    gx: 15,
+    gz: 20,
+    footprint: { x0: 15, z0: 20, x1: 17, z1: 20 },
+  },
+];
+
+function seedFloor2WorldObjects(): void {
+  const existingIds = new Set(
+    db
+      .select({ id: schema.worldObjects.id })
+      .from(schema.worldObjects)
+      .all()
+      .map((r) => r.id),
+  );
+  for (const seed of FLOOR2_WORLD_OBJECT_SEEDS) {
+    if (existingIds.has(seed.id)) continue;
+    db.insert(schema.worldObjects)
+      .values({
+        id: seed.id,
+        type: seed.type,
+        room: seed.room,
+        posX: seed.gx,
+        posY: 3.4,
+        posZ: seed.gz,
+        rotY: 0,
+        metadataJson: JSON.stringify({ floor: 2, footprint: seed.footprint }),
+      })
+      .run();
+  }
+}
+
 function seedWorldObjects(): void {
   const existing = db
     .select({ id: schema.worldObjects.id })
@@ -300,4 +377,5 @@ export function initDb(): void {
   sqlite.exec(DDL);
   seedAgents();
   seedWorldObjects();
+  seedFloor2WorldObjects();
 }
