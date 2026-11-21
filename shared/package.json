@@ -1,0 +1,1 @@
+{"exports":{".":{"default":"./types.ts","types":"./types.ts"}},"main":"types.ts","name":"@living-world/shared","private":true,"scripts":{"typecheck":"tsc --noEmit -p tsconfig.json"},"type":"module","types":"types.ts","version":"0.1.0"}
